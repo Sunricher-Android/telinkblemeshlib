@@ -106,6 +106,7 @@ public class MeshDeviceType {
             case 0x36:
             case 0x66:
             case 0x3C:
+            case 0x20: // Power Metering
                 capabilities.add(Capability.onOff);
                 capabilities.add(Capability.brightness);
                 break;
@@ -276,22 +277,6 @@ public class MeshDeviceType {
             case curtain:
             case bridge:
             case outlet:
-                return true;
-
-            default:
-                return false;
-        }
-    }
-
-    public boolean isSupportSingleAdd() {
-
-        switch (this.category) {
-
-            case light:
-            case remote:
-            case sensor:
-            case rfPa:
-            case customPanel:
                 return true;
 
             default:
