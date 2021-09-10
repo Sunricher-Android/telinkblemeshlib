@@ -20,7 +20,13 @@ import com.clj.fastble.exception.BleException;
 import com.clj.fastble.scan.BleScanRuleConfig;
 import com.clj.fastble.utils.HexUtil;
 import com.sunricher.telinkblemeshlib.callback.DeviceCallback;
+import com.sunricher.telinkblemeshlib.callback.DeviceEventCallback;
 import com.sunricher.telinkblemeshlib.callback.NodeCallback;
+import com.sunricher.telinkblemeshlib.mqttdeviceevent.DateEvent;
+import com.sunricher.telinkblemeshlib.mqttdeviceevent.DeviceTypeEvent;
+import com.sunricher.telinkblemeshlib.mqttdeviceevent.FirmwareEvent;
+import com.sunricher.telinkblemeshlib.mqttdeviceevent.LightOnOffDurationEvent;
+import com.sunricher.telinkblemeshlib.mqttdeviceevent.StateEvent;
 import com.sunricher.telinkblemeshlib.telink.AES;
 import com.sunricher.telinkblemeshlib.telink.Arrays;
 import com.sunricher.telinkblemeshlib.telink.Command;
@@ -61,6 +67,7 @@ public final class MeshManager {
     private MeshNode connectNode;
     private NodeCallback nodeCallback;
     private DeviceCallback deviceCallback;
+    private DeviceEventCallback deviceEventCallback;
     private BleScanCallback scanCallback;
     private BleGattCallback gattCallback;
     private BleNotifyCallback notifyCallback;
@@ -220,6 +227,10 @@ public final class MeshManager {
         this.deviceCallback = deviceCallback;
     }
 
+    public void setDeviceEventCallback(DeviceEventCallback deviceEventCallback) {
+        this.deviceEventCallback = deviceEventCallback;
+    }
+
     /**
      * Scan mesh devices in the current network after login.
      */
@@ -277,6 +288,50 @@ public final class MeshManager {
     void send(MeshCommand command, long interval) {
 
         this.commandExecutor.executeCommand(command, interval);
+    }
+
+    void send(MeshCommand command, boolean isSample) {
+
+        if (isSample) {
+
+            sendSample(command);
+
+        } else {
+
+            send(command);
+        }
+    }
+
+    public void sendMqttMessage(String message) {
+
+        this.sendMqttMessage(message, false);
+    }
+
+    public void sendMqttMessage(String message, boolean isSample) {
+
+        MqttCommand mqttCommand = MqttCommand.makeCommandWithMqttMessage(message);
+        if (mqttCommand == null) {
+
+            Log.i(LOG_TAG, "send mqtt message failed, wrong message " + message);
+            return;
+        }
+
+        Log.i(LOG_TAG, "Will send mqtt message " + message);
+
+        switch (mqttCommand.getCommandType()) {
+
+            case MqttCommand.PAYLOAD_TYPE_COMMAND:
+
+                MeshCommand command = MeshCommand.makeWithMqttCommandData(mqttCommand.getData());
+                if (command != null) {
+                    send(command, isSample);
+                }
+                break;
+
+            case MqttCommand.PAYLOAD_TYPE_SCAN_MESH_DEVICES:
+                scanMeshDevices();
+                break;
+        }
     }
 
     void setNewNetwork(MeshNetwork newNetwork, boolean isMesh) {
@@ -972,6 +1027,7 @@ public final class MeshManager {
 
             case MeshCommand.Const.TAG_APP_TO_NODE:
                 Log.i(LOG_TAG, "app to node tag");
+                this.handleNodeToAppData(data);
                 break;
 
             case MeshCommand.Const.TAG_ON_OFF:
@@ -1049,6 +1105,11 @@ public final class MeshManager {
         if (deviceCallback != null) {
             deviceCallback.didUpdateMeshDevices(this, devices);
         }
+
+        if (deviceEventCallback != null) {
+            StateEvent event = new StateEvent(devices);
+            deviceEventCallback.didUpdateEvent(this, event);
+        }
     }
 
     private void handleNodeToAppData(byte[] data) {
@@ -1076,6 +1137,11 @@ public final class MeshManager {
 
                 if (this.deviceCallback != null) {
                     this.deviceCallback.didUpdateDeviceType(this, address, deviceType, macData);
+                }
+
+                if (this.deviceEventCallback != null) {
+                    DeviceTypeEvent event = new DeviceTypeEvent(address, deviceType, macData);
+                    this.deviceEventCallback.didUpdateEvent(this, event);
                 }
                 break;
 
@@ -1154,6 +1220,11 @@ public final class MeshManager {
         if (deviceCallback != null) {
             deviceCallback.didGetDate(this, command.getSrc(), date);
         }
+
+        if (deviceEventCallback != null) {
+            DateEvent event = new DateEvent(command.getSrc(), date);
+            deviceEventCallback.didUpdateEvent(this, event);
+        }
     }
 
     private void handleFirmwareResponseData(byte[] data) {
@@ -1182,6 +1253,11 @@ public final class MeshManager {
                 deviceCallback.didGetFirmwareVersion(this, command.getSrc(), currentVersion);
             }
 
+            if (deviceEventCallback != null) {
+                FirmwareEvent event = new FirmwareEvent(command.getSrc(), currentVersion);
+                deviceEventCallback.didUpdateEvent(this, event);
+            }
+
         } catch (UnsupportedEncodingException e) {
             e.printStackTrace();
         }
@@ -1206,6 +1282,72 @@ public final class MeshManager {
                 if (deviceCallback != null) {
                     deviceCallback.didGetLightOnOffDuration(this, command.getSrc(), duration);
                 }
+
+                if (deviceEventCallback != null) {
+                    LightOnOffDurationEvent event = new LightOnOffDurationEvent(command.getSrc(), duration);
+                    deviceEventCallback.didUpdateEvent(this, event);
+                }
+                break;
+
+            case MeshCommand.Const.LIGHT_CONTROL_MODE_GET_LIGHT_RUNNING_MODE:
+
+                Log.i(LOG_TAG, "getLightRunningMode response");
+                MeshCommand.LightRunningMode runningMode = MeshCommand.LightRunningMode.makeWithUserData(command.getSrc(), command.getUserData());
+                if (runningMode == null) return;
+                if (deviceCallback == null) return;
+                deviceCallback.didGetLightRunningMode(this, command.getSrc(), runningMode);
+                break;
+
+            case MeshCommand.Const.LIGHT_CONTROL_MODE_SET_LIGHT_RUNNING_MODE:
+                Log.i(LOG_TAG, "setLightRunningMode");
+                break;
+
+            case MeshCommand.Const.LIGHT_CONTROL_MODE_SET_LIGHT_RUNNING_SPEED:
+                Log.i(LOG_TAG, "setLightRunningSpeed");
+                break;
+
+            case MeshCommand.Const.LIGHT_CONTROL_MODE_CUSTOM_LIGHT_RUNNING_MODE:
+
+                Log.i(LOG_TAG, "customLightRunningMode");
+
+                if (((int) command.getUserData()[2] & 0xFF) != 0x00) {
+
+                    Log.i(LOG_TAG, "customLightRunningMode init failed.");
+                    return;
+                }
+
+                int userData3 = (int) command.getUserData()[3] & 0xFF;
+
+                if (userData3 == 0x00) {
+
+                    int value = (((int) command.getUserData()[4] & 0xFF) << 8) | ((int) command.getUserData()[5] & 0xFF);
+                    ArrayList<Integer> modeIds = new ArrayList<>();
+                    for (int i = 0; i < 16; i++) {
+                        if (((0x01 << i) & value) > 0) {
+                            modeIds.add(i + 1);
+                        }
+                    }
+                    Log.i(LOG_TAG, "customLightRunningMode idList count " + modeIds.size());
+
+                    if (deviceCallback == null) return;
+                    deviceCallback.didGetLightRunningModeIdList(this, command.getSrc(), modeIds);
+
+                } else if (userData3 <= 0x10) {
+
+                    int modeId = (int) command.getUserData()[3] & 0xFF;
+                    int colorsCount = (int) command.getUserData()[4] & 0xFF;
+                    int colorIndex = (int) command.getUserData()[5] & 0xFF;
+                    MeshCommand.LightRunningMode.Color color = new MeshCommand.LightRunningMode.Color();
+                    color.setRed((int) command.getUserData()[6] & 0xFF);
+                    color.setGreen((int) command.getUserData()[7] & 0xFF);
+                    color.setBlue((int) command.getUserData()[8] & 0xFF);
+
+                    Log.i(LOG_TAG, "LightRunningColor modeId " + modeId + " count " + colorsCount + " index " + colorIndex);
+
+                    if (deviceCallback == null) return;
+                    deviceCallback.didGetLightRunningModeId(this, command.getSrc(), modeId, colorsCount, colorIndex, color);
+                }
+
                 break;
 
             default:
@@ -1226,7 +1368,7 @@ public final class MeshManager {
 
         for (byte item : command.getUserData()) {
 
-            int itemInt = (int)item & 0xFF;
+            int itemInt = (int) item & 0xFF;
             if (itemInt == 0xFF) continue;
             int group = itemInt | 0x8000;
             if (groups.contains(group)) continue;
